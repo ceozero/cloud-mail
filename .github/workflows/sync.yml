@@ -1,0 +1,56 @@
+name: 同步上游 cloud-mail
+
+on:
+  # 每天北京时间 11:17 执行一次（UTC 03:17）。
+  schedule:
+    - cron: '0 0 * * *'
+  # 允许在 Actions 页面随时手动执行。
+  workflow_dispatch:
+
+# 允许工作流把合并结果推送回当前 fork。
+permissions:
+  contents: write
+
+# 同一分支只保留一次同步任务，避免并发推送产生竞态。
+concurrency:
+  group: sync-upstream-${{ github.event.repository.default_branch }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出 fork 的默认分支
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: 拉取并合并上游更新
+        shell: bash
+        env:
+          TARGET_BRANCH: ${{ github.event.repository.default_branch }}
+          UPSTREAM_REPOSITORY: maillab/cloud-mail
+        run: |
+          set -euo pipefail
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+
+          # 动态读取上游默认分支，避免将来上游改名后工作流失效。
+          upstream_branch="$(git ls-remote --symref upstream HEAD | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2; exit}')"
+          if [[ -z "${upstream_branch}" ]]; then
+            echo '无法确定上游默认分支。' >&2
+            exit 1
+          fi
+
+          git fetch upstream "${upstream_branch}"
+          if git merge --no-edit "upstream/${upstream_branch}"; then
+            git push origin "HEAD:${TARGET_BRANCH}"
+          else
+            # Runner 是临时环境；中止冲突合并后以失败状态保留日志供人工处理。
+            git merge --abort || true
+            echo '上游更新与 fork 的改动发生冲突，请在本地或通过 PR 手动解决。' >&2
+            exit 1
+          fi
